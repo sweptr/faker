@@ -1,0 +1,127 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+package faker;
+
+use File::Spec;
+use File::Basename;
+use Cwd ();
+
+my $USAGE = <<'...';
+Usage: facker [command] <args>
+
+    build <base|container>      build base or container images
+    run   <container> <command> login to container image
+    help                        Show this ;-)
+...
+
+my $HOME        = $ENV{'HOME'};
+my $EXECDIR     = File::Spec->rel2abs(Cwd::getcwd());
+my $NAME        = File::Basename::basename($EXECDIR);
+my $FAKERFILE   = File::Spec->catfile( $EXECDIR, 'Fakerfile' );
+
+my $DISTNAME    = 'squeeze';
+my $DISTURL     = 'http://ftp.jp.debian.org/debian/';
+
+# --- #
+
+my $command = shift @ARGV or die $USAGE;
+my @args    = @ARGV;
+
+my $action  = __PACKAGE__->can("cmd_${command}");
+
+if ( ref($action) ne 'CODE' ) {
+    die "Unknown command: ${command}";
+} else {
+    exit( $action->( @args ) );
+}
+
+# --- #
+
+sub cmd_help {
+    print $USAGE;
+    return 1;
+}
+
+sub cmd_build {
+    my ( $type, @args ) = @_;
+    if ( $type ne 'base' && $type ne 'container' ) {
+        die "Unsupported build type: ${type}";
+    }
+
+    my $basedir  = File::Spec->catdir( $HOME, '.faker', 'base', $NAME );
+    my $imagedir = File::Spec->catdir( $HOME, '.faker', 'container', $NAME );
+
+    my $workdir  = ( $type eq 'base' ) ? $basedir : $imagedir ;
+
+    my $statefile = File::Spec->catfile( $workdir, 'fakeroot.state' );
+    my $chrootdir = File::Spec->catdir(  $workdir, 'root' );
+
+    if ( -e $workdir ) {
+        my $code = system(qw[ rm -r ], $workdir);
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+    }
+
+    my $ret = system(qw[ mkdir -p ], $workdir);
+    die "-----> !ERROR: exit code is: ${ret}" if ( $ret != 0 );
+
+    print "-----> Bootstrap container image (${type})\n";
+    if ( $type eq 'base' ) {
+        my $code = system(
+            "/usr/bin/env", "PATH=/sbin:/usr/sbin:@{[ $ENV{'PATH'} ]}",
+            'fakeroot', '-s', $statefile, 'fakechroot', 'debootstrap', '--include=zsh', '--variant=fakechroot', $DISTNAME, $chrootdir, $DISTURL,
+        );
+
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+    } elsif ( $type eq 'container' ) {
+        my $baseimg = shift @args;
+        die "-----> !ERROR: base image is not specified." if ( ! defined $baseimg || $baseimg eq q{} );
+        
+        my $base_container = File::Spec->catdir( $HOME, '.faker', 'base', $baseimg, 'root' );
+        my $code = system( '/bin/cp', "-R", "-s", $base_container, qq<${imagedir}/> );
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+    }
+
+    if ( -e $FAKERFILE ) {
+        my $builder = File::Spec->catdir( $chrootdir, 'root', 'Fakerfile' );
+
+        print "-----> Build container image by ${FAKERFILE}\n";
+
+        my $code = 0;
+
+        $code = system('/bin/bash', "-c", "echo -n '' > ${statefile}");
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+
+        $code = system('/bin/cp', $FAKERFILE, $builder);
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+
+        $code = system('/bin/chmod', "+x", $builder);
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+
+        $code = system( '/usr/bin/env', "HOME=/root", "/usr/bin/fakeroot", "-i", $statefile, "/usr/bin/fakechroot", "/usr/sbin/chroot", $chrootdir, "/root/Fakerfile" );
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+    }
+
+    print "-----> Finished the all ;-)\n";
+    return 0;
+}
+
+sub cmd_run {
+    my ( $container, $cmd ) = @_;
+    
+    my $imagedir    = File::Spec->catdir( $HOME, '.faker', 'container', $container );
+    my $statefile   = File::Spec->catfile( $imagedir, 'fakeroot.state' );
+    my $chrootdir   = File::Spec->catdir( $imagedir, 'root' );
+
+    my $code = system('/bin/bash', '-c', "echo -n '' > ${statefile}");
+    die "!ERROR: exit code is: ${code}" if ( $code != 0 );
+
+    return exec(
+        "/usr/bin/env", "HOME=/root", "/usr/bin/fakeroot", "-i", $statefile, "/usr/bin/fakechroot", "/usr/sbin/chroot", $chrootdir, $cmd
+    );
+}
+
+1;
+
