@@ -7,38 +7,36 @@ package faker;
 
 use File::Spec;
 use File::Basename;
-use Cwd ();
 
 my $USAGE = <<'...';
-Usage: facker [command] <args>
+Usage: faker [command] <args>
+    build
+      base <name> [Fakerfile]                   build base image by Fakerfile
+      container <base image> <name> [Fakerfile] build container image by Fakerfile
 
-    build <base|container>      build base or container images
-    run   <container> <command> login to container image
-    help                        Show this ;-)
+    rm  <base|container> <name>                 remove base or container image
+    run <container> <command>                   run command with container
+    help                                        Show this ;-)
 ...
 
 my $HOME        = $ENV{'HOME'};
-my $EXECDIR     = File::Spec->rel2abs(Cwd::getcwd());
-my $NAME        = File::Basename::basename($EXECDIR);
-my $FAKERFILE   = File::Spec->catfile( $EXECDIR, 'Fakerfile' );
+my $FAKERDIR    = File::Spec->catdir( $HOME, '.faker' );
 
 my $DISTNAME    = 'squeeze';
 my $DISTURL     = 'http://ftp.jp.debian.org/debian/';
 
-# --- #
+exit( &main() );
 
-my $command = shift @ARGV or die $USAGE;
-my @args    = @ARGV;
+sub main {
+    my $command = shift @ARGV or die $USAGE;
+    my @args    = @ARGV;
 
-my $action  = __PACKAGE__->can("cmd_${command}");
+    my $action  = faker->can("cmd_${command}");
+    die "Unknown command: ${command}"
+        if ( ref($action) ne 'CODE' );
 
-if ( ref($action) ne 'CODE' ) {
-    die "Unknown command: ${command}";
-} else {
     exit( $action->( @args ) );
 }
-
-# --- #
 
 sub cmd_help {
     print $USAGE;
@@ -47,14 +45,25 @@ sub cmd_help {
 
 sub cmd_build {
     my ( $type, @args ) = @_;
-    if ( $type ne 'base' && $type ne 'container' ) {
-        die "Unsupported build type: ${type}";
+    die "Unsupported build type: ${type}"
+        if ( $type ne 'base' && $type ne 'container' );
+
+    my ( $name, $fakerfile, $basename );
+
+    if ( $type eq 'base' ) {
+        ( $name, $fakerfile ) = @args;
+    } else {
+        ( $basename, $name, $fakerfile ) = @args;
     }
 
-    my $basedir  = File::Spec->catdir( $HOME, '.faker', 'base', $NAME );
-    my $imagedir = File::Spec->catdir( $HOME, '.faker', 'container', $NAME );
+    if ( ! defined $name || $name eq q{} ) {
+        die "-----> !ERROR: image name is not specified."
+    }
 
-    my $workdir  = ( $type eq 'base' ) ? $basedir : $imagedir ;
+    my $basedir  = File::Spec->catdir( $FAKERDIR, 'base', $name );
+    my $imagedir = File::Spec->catdir( $FAKERDIR, 'container', $name );
+
+    my $workdir  = ( $type eq 'base' ) ? $basedir : $imagedir ; 
 
     my $statefile = File::Spec->catfile( $workdir, 'fakeroot.state' );
     my $chrootdir = File::Spec->catdir(  $workdir, 'root' );
@@ -64,8 +73,10 @@ sub cmd_build {
         die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
     }
 
-    my $ret = system(qw[ mkdir -p ], $workdir);
-    die "-----> !ERROR: exit code is: ${ret}" if ( $ret != 0 );
+    do {
+        my $code = system(qw[ mkdir -p ], $workdir);
+        die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
+    };
 
     print "-----> Bootstrap container image (${type})\n";
     if ( $type eq 'base' ) {
@@ -76,25 +87,26 @@ sub cmd_build {
 
         die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
     } elsif ( $type eq 'container' ) {
-        my $baseimg = shift @args;
-        die "-----> !ERROR: base image is not specified." if ( ! defined $baseimg || $baseimg eq q{} );
+        die "-----> !ERROR: base image is not specified."
+            if ( ! defined $basename || $basename eq q{} );
+
+        my $baseimage = File::Spec->catdir( $FAKERDIR, 'base', $basename, 'root' );
         
-        my $base_container = File::Spec->catdir( $HOME, '.faker', 'base', $baseimg, 'root' );
-        my $code = system( '/bin/cp', "-R", "-s", $base_container, qq<${imagedir}/> );
+        my $code = system('/bin/cp', "-R", "-l", $baseimage, qq<${imagedir}/>);
         die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
     }
 
-    if ( -e $FAKERFILE ) {
+    if ( defined $fakerfile && $fakerfile ne q{} && -e $fakerfile ) {
         my $builder = File::Spec->catdir( $chrootdir, 'root', 'Fakerfile' );
 
-        print "-----> Build container image by ${FAKERFILE}\n";
+        print "-----> Build container image by ${fakerfile}\n";
 
         my $code = 0;
 
         $code = system('/bin/bash', "-c", "echo -n '' > ${statefile}");
         die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
 
-        $code = system('/bin/cp', $FAKERFILE, $builder);
+        $code = system('/bin/cp', $fakerfile, $builder);
         die "-----> !ERROR: exit code is: ${code}" if ( $code != 0 );
 
         $code = system('/bin/chmod', "+x", $builder);
@@ -106,6 +118,20 @@ sub cmd_build {
 
     print "-----> Finished the all ;-)\n";
     return 0;
+}
+
+sub cmd_rm {
+    my ( $type, $name ) = @_;
+    die "Unsupported build type: ${type}"
+        if ( $type ne 'base' && $type ne 'container' );
+        
+    my $basedir  = File::Spec->catdir( $FAKERDIR, 'base', $name );
+    my $imagedir = File::Spec->catdir( $FAKERDIR, 'container', $name );
+
+    my $target   = ( $type eq 'base' ) ? $basedir : $imagedir ;
+    return exec(
+        "/bin/rm", "-r", $target,
+    )
 }
 
 sub cmd_run {
